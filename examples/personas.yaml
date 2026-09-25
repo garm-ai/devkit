@@ -1,0 +1,66 @@
+# Personas for the dev identity provider.
+#
+# A FILE, not a store, and deliberately so: everything here is configuration
+# that a pull request can argue about, the way garm.yaml and the proto
+# annotations are. There is no create/update/delete endpoint, because a dev
+# IdP with a CRUD API starts to look like a product, and the next step after
+# that is someone pointing a staging environment at it.
+#
+#   garmdev idp --personas examples/personas.yaml
+#   curl -s '127.0.0.1:7450/token?user=alice'
+#   curl -s '127.0.0.1:7450/token?user=bob&as=triage-bot'   # delegated
+
+# A role is a BUNDLE of claims, and bundling is an identity provider's job.
+# garm never sees a role — it receives the clearance, compartments and verbs a
+# role expands to. This is exactly how a real IdP works, and it is why mapping
+# Entra app roles onto these fields belongs in step 1 rather than in the chain.
+roles:
+  support-agent:
+    clearance: INTERNAL
+    compartments: [pii-contact]
+    verbs: [READ]
+
+  payments-desk:
+    clearance: RESTRICTED
+    compartments: [financial]
+    verbs: [READ, WRITE]
+
+  # Deliberately narrow. A persona holding only this is the one to route
+  # through when you want to watch a tool list shrink.
+  read-only:
+    clearance: PUBLIC
+    verbs: [READ]
+
+users:
+  # `subject` is what lands in `sub` and therefore in every ledger row. It is
+  # separate from the handle above it on purpose: the handle is what you type,
+  # the subject is the identity that must stay stable when the handle changes.
+  # Real identity providers emit opaque subjects, and a dev tool that hid that
+  # would teach people to key dashboards on names.
+  alice:
+    subject: "user:alice"
+    # Two roles UNION: holding both gives more. Clearance takes the highest.
+    # That is the opposite of what delegation does, which is why the two are
+    # separate operations — see triage-bot below.
+    roles: [payments-desk, support-agent]
+
+  bob:
+    subject: "user:bob"
+    roles: [support-agent]
+
+agents:
+  # may_act_for is enforced when MINTING, and garm never sees it. garm folds a
+  # delegation chain it is given and can only narrow it, but it has no way to
+  # know whether the delegation was permitted in the first place. The IdP
+  # asserts that by agreeing to sign. A dev IdP that minted any chain asked of
+  # it would teach that delegation is unconstrained, which is the opposite of
+  # true — try `?user=alice&as=triage-bot` and watch it refuse.
+  triage-bot:
+    subject: "agent:triage-bot"
+    roles: [support-agent]
+    may_act_for: [bob]
+
+  auditor-bot:
+    subject: "agent:auditor-bot"
+    roles: [read-only]
+    may_act_for: [alice, bob]

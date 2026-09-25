@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>garmdev idp</title>
+<style>
+  :root {
+    --bg:#f5f6f8; --surface:#fff; --ink:#1c232e; --muted:#5a6472;
+    --line:#dde2e9; --accent:#c25e2e; --accent-soft:#f3e2d6; --good:#2e7d5b;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#10141a; --surface:#161c24; --ink:#e8eaee; --muted:#98a2b0;
+            --line:#2a323d; --accent:#e07938; --accent-soft:#33241a; --good:#5bb48c; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.6 ui-sans-serif,system-ui,sans-serif; }
+  .wrap { max-width:60rem; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:20px; margin:0 0 2px; }
+  .warn { background:var(--accent-soft); border:1px solid var(--accent);
+          border-radius:8px; padding:10px 14px; margin:14px 0 22px; font-size:14px; }
+  .warn b { color:var(--accent); }
+  .grid { display:grid; grid-template-columns:minmax(0,18rem) minmax(0,1fr); gap:20px; align-items:start; }
+  @media (max-width:52rem) { .grid { grid-template-columns:1fr; } }
+  fieldset { border:1px solid var(--line); border-radius:10px; background:var(--surface);
+             padding:12px 16px 16px; margin:0 0 14px; }
+  legend { font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+           color:var(--muted); padding:0 6px; }
+  label { display:block; font-size:14px; margin:8px 0 0; }
+  select { width:100%; margin-top:4px; padding:6px 8px; font-family:var(--mono); font-size:13px;
+           border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); }
+  .hint { font-size:12.5px; color:var(--muted); margin:6px 0 0; }
+  .card { border:1px solid var(--line); border-radius:10px; background:var(--surface);
+          padding:12px 16px 16px; margin:0 0 14px; }
+  .card h2 { font-size:14px; margin:0 0 8px; font-family:var(--mono); letter-spacing:.06em;
+             text-transform:uppercase; color:var(--muted); font-weight:500; }
+  pre { margin:0; font-family:var(--mono); font-size:12.5px; white-space:pre-wrap;
+        word-break:break-all; color:var(--ink); }
+  ul.tools { list-style:none; margin:0; padding:0; }
+  ul.tools li { padding:6px 0; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:13px; }
+  ul.tools li:last-child { border-bottom:none; }
+  ul.tools .meta { color:var(--muted); font-size:11.5px; }
+  .count { color:var(--good); font-weight:600; }
+  .err { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>garmdev idp</h1>
+  <div class="warn">
+    <b>Development only.</b> This mints any identity in its personas file, with no
+    authentication, which is why it binds loopback and nothing else. Never point a
+    deployment at it — garm would be trusting an issuer that hands out clearances to
+    whoever asks.
+  </div>
+
+  <div class="grid">
+    <div>
+      <fieldset>
+        <legend>Identity</legend>
+        <label>User
+          <select id="user"></select>
+        </label>
+        <label>Acting through
+          <select id="as"><option value="">— nobody, direct —</option></select>
+        </label>
+        <p class="hint">
+          An agent may only act for the users its <code>may_act_for</code> lists. garm
+          cannot enforce that: it folds the chain it is given and can only narrow it.
+          The IdP asserts the entitlement by agreeing to sign.
+        </p>
+      </fieldset>
+      <fieldset>
+        <legend>Roles held</legend>
+        <div id="roles" class="hint">—</div>
+        <p class="hint">
+          Two roles give you the <b>union</b>, at the highest clearance. Acting through an
+          agent gives you the <b>intersection</b>. Opposite operations on one token.
+        </p>
+      </fieldset>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>Claims</h2>
+        <pre id="claims">pick an identity</pre>
+      </div>
+      <div class="card">
+        <h2>Tools this principal can see</h2>
+        <div id="tools">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var personas = null;
+
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
+    });
+  }
+
+  function decodeClaims(token) {
+    var part = token.split(".")[1];
+    part = part.replace(/-/g, "+").replace(/_/g, "/");
+    while (part.length % 4) { part += "="; }
+    return JSON.parse(atob(part));
+  }
+
+  function refreshRoles() {
+    var u = personas.users[$("user").value];
+    var a = $("as").value ? personas.agents[$("as").value] : null;
+    var parts = [];
+    if (u) { parts.push("<b>" + esc($("user").value) + "</b>: " + esc((u.roles || []).join(", ") || "none")); }
+    if (a) { parts.push("<b>" + esc($("as").value) + "</b>: " + esc((a.roles || []).join(", ") || "none")); }
+    $("roles").innerHTML = parts.join("<br>") || "—";
+  }
+
+  function load() {
+    refreshRoles();
+    var q = "user=" + encodeURIComponent($("user").value) +
+            "&as=" + encodeURIComponent($("as").value);
+
+    fetch("/tools?" + q).then(function (r) {
+      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+    }).then(function (res) {
+      if (!res.ok) {
+        $("claims").innerHTML = '<span class="err">' + esc(res.text.trim()) + "</span>";
+        $("tools").innerHTML = '<span class="err">no token was minted</span>';
+        return;
+      }
+      var data = JSON.parse(res.text);
+      $("claims").textContent = JSON.stringify(decodeClaims(data.token), null, 2);
+
+      var tools = (data.tools && data.tools.tools) || [];
+      if (data.status !== 200) {
+        $("tools").innerHTML = '<span class="err">garm answered ' + data.status +
+          "</span><div class=hint>Nothing is mounted yet, so an empty catalogue is the " +
+          "honest answer — but a non-200 means the plane refused the token.</div>";
+        return;
+      }
+      if (!tools.length) {
+        $("tools").innerHTML = '<span class="count">0 tools</span>' +
+          "<div class=hint>Either this principal can see none, or nothing is mounted in " +
+          "the garm you are pointing at. Both are real states; the catalogue lists what " +
+          "is mounted, not what is declared.</div>";
+        return;
+      }
+      $("tools").innerHTML = '<span class="count">' + tools.length + " tools</span><ul class=tools>" +
+        tools.map(function (t) {
+          return "<li>" + esc(t.name || t.fqn) +
+            '<div class="meta">' + esc(t.verb || "") + " · " + esc(t.minClearance || "") +
+            (t.sets && t.sets.length ? " · " + esc(t.sets.join(", ")) : "") + "</div></li>";
+        }).join("") + "</ul>";
+    }).catch(function (e) {
+      $("tools").innerHTML = '<span class="err">' + esc(e.message) + "</span>";
+    });
+  }
+
+  fetch("/personas").then(function (r) { return r.json(); }).then(function (p) {
+    personas = { users: p.users || {}, agents: p.agents || {}, roles: p.roles || {} };
+    Object.keys(personas.users).sort().forEach(function (k) {
+      $("user").add(new Option(k, k));
+    });
+    Object.keys(personas.agents).sort().forEach(function (k) {
+      $("as").add(new Option(k, k));
+    });
+    $("user").addEventListener("change", load);
+    $("as").addEventListener("change", load);
+    load();
+  }).catch(function () {
+    document.querySelector(".grid").innerHTML =
+      '<div class="card err">No personas configured. Start with ' +
+      "<code>--personas garm.personas.yaml</code>.</div>";
+  });
+})();
+</script>
+</body>
+</html>

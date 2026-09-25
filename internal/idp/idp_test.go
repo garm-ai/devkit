@@ -1,0 +1,362 @@
+package idp
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	jose "github.com/go-jose/go-jose/v4"
+)
+
+// claimsOf verifies a minted token against the served key set and returns
+// its body.
+//
+// It checks the SIGNATURE and reads the CLAIMS, and stops deliberately short
+// of building a Principal. Folding the act chain, resolving compartments and
+// mapping the clearance enum are the verifier's job, and the verifier lives
+// in garmd, where the request path is. This repository must not import it:
+// this binary mints tokens, and a module that can assert any identity must
+// never appear in the dependency graph of one that decides what an identity
+// may do.
+//
+// The hazard that leaves is the two halves drifting apart silently, until
+// every dev token stops verifying for a reason nobody can see. It is closed
+// from the other side rather than here — `mise run goldens` writes a token
+// and key set into testdata/, garmd's authn tests read them, and a change to
+// the body below fails garmd's CI instead of somebody's afternoon.
+func claimsOf(t *testing.T, srv *httptest.Server, token string) map[string]any {
+	t.Helper()
+	resp, err := http.Get(srv.URL + "/.well-known/jwks.json")
+	if err != nil {
+		t.Fatalf("GET jwks: %v", err)
+	}
+	defer resp.Body.Close()
+	var set jose.JSONWebKeySet
+	if err := json.NewDecoder(resp.Body).Decode(&set); err != nil {
+		t.Fatalf("decoding the key set: %v", err)
+	}
+	if len(set.Keys) == 0 {
+		t.Fatal("the key set is empty, so nothing could verify a token")
+	}
+	sig, err := jose.ParseSigned(token, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil {
+		t.Fatalf("parsing the token: %v", err)
+	}
+	payload, err := sig.Verify(set.Keys[0])
+	if err != nil {
+		t.Fatalf("a token the dev IdP minted did not verify against the key it "+
+			"serves: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(payload, &body); err != nil {
+		t.Fatalf("the token body is not JSON: %v", err)
+	}
+	return body
+}
+
+// garmClaimIn reads the `garm` claim, which is where every authority field
+// lives. Named to avoid colliding with garmClaim, which builds it.
+func garmClaimIn(t *testing.T, body map[string]any) map[string]any {
+	t.Helper()
+	c, ok := body["garm"].(map[string]any)
+	if !ok {
+		t.Fatalf("no garm claim in %v", body)
+	}
+	return c
+}
+
+func startIDP(t *testing.T) *httptest.Server {
+	t.Helper()
+	h, err := New(Config{Audience: "garm"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func mint(t *testing.T, srv *httptest.Server, query string) string {
+	t.Helper()
+	resp, err := http.Get(srv.URL + "/token?" + query)
+	if err != nil {
+		t.Fatalf("GET /token: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /token: status %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading token: %v", err)
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func TestAMintedTokenIsSignedByTheKeyItServes(t *testing.T) {
+	srv := startIDP(t)
+	token := mint(t, srv,
+		"sub=alice&clearance=CLEARANCE_CONFIDENTIAL&compartments=financial&verbs=VERB_READ")
+
+	body := claimsOf(t, srv, token)
+	if body["sub"] != "alice" {
+		t.Errorf("sub = %v, want alice", body["sub"])
+	}
+	if body["iss"] != devIssuer {
+		t.Errorf("iss = %v, want %s", body["iss"], devIssuer)
+	}
+	if body["aud"] != "garm" {
+		t.Errorf("aud = %v, want garm", body["aud"])
+	}
+	if got := garmClaimIn(t, body)["clearance"]; got != "CLEARANCE_CONFIDENTIAL" {
+		t.Errorf("clearance = %v, want CLEARANCE_CONFIDENTIAL", got)
+	}
+}
+
+// The act chain carries BOTH identities, which is what makes narrowing
+// possible on the far side.
+//
+// What this does NOT assert is that an INTERNAL agent acting for a
+// CONFIDENTIAL user comes out INTERNAL. That is folding, it happens in the
+// verifier, and asserting it here would mean this repository owned a claim
+// about code it cannot see. garmd owns it, against the golden this
+// repository emits.
+func TestAnActChainCarriesBothIdentities(t *testing.T) {
+	srv := startIDP(t)
+	token := mint(t, srv,
+		"sub=alice&clearance=CLEARANCE_CONFIDENTIAL&compartments=financial&verbs=VERB_READ"+
+			"&act=agent-1&act_clearance=CLEARANCE_INTERNAL")
+
+	body := claimsOf(t, srv, token)
+	if got := garmClaimIn(t, body)["clearance"]; got != "CLEARANCE_CONFIDENTIAL" {
+		t.Errorf("the subject's own clearance = %v, want CONFIDENTIAL", got)
+	}
+	act, ok := body["act"].(map[string]any)
+	if !ok {
+		t.Fatalf("no act chain in %v", body)
+	}
+	if act["sub"] != "agent-1" {
+		t.Errorf("act.sub = %v, want agent-1", act["sub"])
+	}
+	ac, ok := act["garm"].(map[string]any)
+	if !ok {
+		t.Fatalf("the act chain carries no garm claim, so the verifier would have "+
+			"nothing to narrow with: %v", act)
+	}
+	if ac["clearance"] != "CLEARANCE_INTERNAL" {
+		t.Errorf("act clearance = %v, want INTERNAL", ac["clearance"])
+	}
+}
+
+// A token minter that anyone on the network can reach is a way to mint any
+// identity. It binds loopback or it does not bind.
+func TestTheIDPRefusesANonLoopbackBind(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:7450", ":7450", "10.0.0.5:7450", "[::]:7450"} {
+		if err := checkLoopback(addr); err == nil {
+			t.Errorf("%s was accepted; a dev token minter must not be reachable off "+
+				"this machine — it will mint any identity anyone asks for", addr)
+		}
+	}
+	for _, addr := range []string{"127.0.0.1:7450", "localhost:7450", "[::1]:7450"} {
+		if err := checkLoopback(addr); err != nil {
+			t.Errorf("%s was refused: %v", addr, err)
+		}
+	}
+}
+
+func TestJWKSServesAKeyWithAKid(t *testing.T) {
+	srv := startIDP(t)
+	resp, err := http.Get(srv.URL + "/.well-known/jwks.json")
+	if err != nil {
+		t.Fatalf("GET jwks: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	body := string(raw)
+	if !strings.Contains(body, `"kid"`) {
+		t.Errorf("the key set publishes no kid, so no token can name its key: %s", body)
+	}
+}
+
+func startIDPWithPersonas(t *testing.T) *httptest.Server {
+	t.Helper()
+	p, err := loadPersonas(writePersonas(t, personasYAML))
+	if err != nil {
+		t.Fatalf("loadPersonas: %v", err)
+	}
+	h, err := New(Config{Audience: "garm", Personas: p})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A persona's roles must reach the token as the authority they expand to.
+// Roles themselves never appear: garm receives clearance, compartments and
+// verbs, never a role name, because a role reaching the policy chain would be
+// a second vocabulary for answering the same question.
+func TestAPersonaMintsTheAuthorityItsRolesExpandTo(t *testing.T) {
+	srv := startIDPWithPersonas(t)
+	body := claimsOf(t, srv, mint(t, srv, "user=alice"))
+
+	if body["sub"] != "user:alice" {
+		t.Errorf("sub = %v, want the file's subject rather than the handle", body["sub"])
+	}
+	c := garmClaimIn(t, body)
+	if c["clearance"] != "CLEARANCE_RESTRICTED" {
+		t.Errorf("clearance = %v; alice holds two roles and must get the highest", c["clearance"])
+	}
+	if c["kind"] != "USER" {
+		t.Errorf("kind = %v, want USER", c["kind"])
+	}
+	if _, leaked := c["roles"]; leaked {
+		t.Error("the token carries role names; garm must never see a role, only what " +
+			"it expands to")
+	}
+}
+
+// The delegation round trip: entitled, minted, both halves present.
+//
+// Narrowing is asserted in garmd against the golden, for the reason given on
+// TestAnActChainCarriesBothIdentities.
+func TestADelegatedPersonaTokenCarriesTheAgentAsActor(t *testing.T) {
+	srv := startIDPWithPersonas(t)
+
+	// bob is support-agent (INTERNAL); triage-bot may act for bob.
+	direct := claimsOf(t, srv, mint(t, srv, "user=bob"))
+	delegated := claimsOf(t, srv, mint(t, srv, "user=bob&as=triage-bot"))
+
+	if delegated["sub"] != direct["sub"] {
+		t.Errorf("delegation changed the subject: %v vs %v", delegated["sub"], direct["sub"])
+	}
+	act, ok := delegated["act"].(map[string]any)
+	if !ok {
+		t.Fatalf("no act chain in the delegated token: %v", delegated)
+	}
+	if act["sub"] != "agent:triage-bot" {
+		t.Errorf("act.sub = %v, want the agent's subject", act["sub"])
+	}
+	// The subject's own claim is untouched by delegation. A minter that
+	// pre-narrowed would destroy the information the verifier needs to fold,
+	// and would hide whose authority was actually being exercised.
+	if garmClaimIn(t, delegated)["clearance"] != garmClaimIn(t, direct)["clearance"] {
+		t.Error("minting narrowed the subject's own clearance; folding belongs to the " +
+			"verifier, which needs both halves to do it")
+	}
+	if got := garmClaimIn(t, delegated)["kind"]; got != "USER" {
+		t.Errorf("kind = %v; the authority being exercised is bob's, and the agent "+
+			"exercising it is the actor", got)
+	}
+}
+
+// The entitlement is enforced at MINT time, because garm cannot enforce it at
+// verify time — it folds what it is given.
+func TestMintingRefusesAnUnentitledDelegation(t *testing.T) {
+	srv := startIDPWithPersonas(t)
+
+	resp, err := http.Get(srv.URL + "/token?user=alice&as=triage-bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status %d; triage-bot may act for bob only, and minting the chain "+
+			"anyway would teach that delegation is unconstrained", resp.StatusCode)
+	}
+}
+
+func TestPersonasAreListedButNotWritable(t *testing.T) {
+	srv := startIDPWithPersonas(t)
+
+	resp, err := http.Get(srv.URL + "/personas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /personas: status %d", resp.StatusCode)
+	}
+
+	// There is deliberately no create/update/delete: management is editing
+	// the file, which keeps personas reviewable and diffable.
+	post, err := http.Post(srv.URL+"/personas", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer post.Body.Close()
+	body, _ := io.ReadAll(post.Body)
+	if post.StatusCode == http.StatusCreated || strings.Contains(string(body), "created") {
+		t.Error("POST /personas appears to have created something; personas are a file, " +
+			"not a store, and a CRUD API is how a dev IdP turns into a product")
+	}
+}
+
+// The page must reference only its own origin. It is served by a tool whose
+// whole premise is that it works on a laptop with nothing else running, and a
+// CDN reference would make the dev UI silently depend on the internet.
+func TestTheUIFetchesNothingFromTheInternet(t *testing.T) {
+	srv := startIDPWithPersonas(t)
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /: status %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, host := range []string{"https://", "http://", "//cdn", "unpkg", "jsdelivr"} {
+		if strings.Contains(string(body), host) {
+			t.Errorf("the UI references %q; it must work with no network at all", host)
+		}
+	}
+}
+
+// The proxy reuses the minting path rather than reimplementing it, so the
+// entitlement check applies to it too. If the two ever drifted, this is the
+// check that would be missing from one of them.
+func TestTheToolsProxyEnforcesDelegationEntitlement(t *testing.T) {
+	srv := startIDPWithPersonas(t)
+
+	resp, err := http.Get(srv.URL + "/tools?user=alice&as=triage-bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status %d; the proxy must refuse an unentitled chain before it "+
+			"reaches garm, exactly as /token does", resp.StatusCode)
+	}
+}
+
+// garm being absent is a normal state for a dev tool, and must read as one.
+func TestTheProxySaysSoWhenGarmIsNotRunning(t *testing.T) {
+	p, err := loadPersonas(writePersonas(t, personasYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A port nothing is listening on.
+	h, err := New(Config{Audience: "garm", Personas: p, GarmURL: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/tools?user=alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "could not reach garm") {
+		t.Errorf("an unreachable garm produced %q; it should say so plainly rather "+
+			"than look like an empty catalogue", string(body))
+	}
+}

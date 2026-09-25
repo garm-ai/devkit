@@ -1,0 +1,61 @@
+# CI for devkit.
+#
+# Two jobs. The first is the ordinary one. The second asserts the boundary
+# this repository exists to hold — asserted rather than documented, because a
+# single careless import would end it silently.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+      - run: mise run lint
+      - run: mise run build
+      - run: mise run test
+
+  boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      # devkit must not depend on the product.
+      #
+      # Two reasons, and the second is the one that bites. It keeps these
+      # tools building when the tree does not — which is exactly when you
+      # reach for them. And it keeps the minter and the verifier in separate
+      # dependency graphs, so nothing that decides what an identity MAY DO can
+      # ever reach the thing that hands identities out.
+      - name: no dependency on the product
+        run: |
+          if go list -deps ./... 2>/dev/null | grep -E 'garm-ai/(garm|garmd|tool-go|tools)'; then
+            echo "devkit depends on the product; see CLAUDE.md" >&2
+            exit 1
+          fi
+          echo "ok: devkit depends on no garm module"
+
+      # The reciprocal guard lives in garm and garmd: neither may require
+      # this module. It is asserted there because that is where the violating
+      # go.mod would be.
+      - name: the example personas load
+        run: go test ./internal/idp -run TestTheShippedExamplePersonasLoad -count=1

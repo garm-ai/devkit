@@ -1,0 +1,35 @@
+# Toolchain and tasks for devkit. `mise install` gets you a working checkout;
+# `mise run ci` is exactly what CI runs.
+#
+# Task names match the other garm-ai repositories on purpose: `mise run test`
+# means the same thing everywhere, so moving between repositories costs no
+# relearning.
+
+[tools]
+go = "1.26"
+
+[tasks.build]
+description = "Build every package"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run the tests"
+# -timeout because Go's default is ten minutes, and a test waiting on an HTTP
+# server that never answers will sit there for all of it.
+run = "go test ./... -race -count=1 -timeout 120s"
+
+[tasks.lint]
+description = "Vet the Go"
+run = "go vet ./..."
+
+[tasks.fmt]
+description = "Format"
+run = "go fmt ./..."
+
+[tasks.idp]
+description = "Run the dev identity provider with the example personas"
+run = "go run ./cmd/garmdev idp --personas examples/personas.yaml"
+
+[tasks.ci]
+description = "Everything CI runs"
+depends = ["lint", "build", "test"]
