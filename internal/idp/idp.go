@@ -47,6 +47,12 @@ type Config struct {
 
 	// GarmURL is the tool plane the UI asks what a principal can see.
 	GarmURL string
+
+	// Tenant overrides the personas file's tenant for every identity this
+	// server mints. Everything downstream refuses a token with no tenant —
+	// the STS will not exchange one, because confinement depends on the value
+	// flowing from a verified token — so this is not decoration.
+	Tenant string
 }
 
 type server struct {
@@ -55,6 +61,7 @@ type server struct {
 	jwks     []byte
 	audience string
 	ttl      time.Duration
+	tenant   string
 	personas *personas
 	garmURL  string
 }
@@ -89,8 +96,9 @@ func New(cfg Config) (http.Handler, error) {
 
 	s := &server{
 		key: key, kid: kid, jwks: jwks,
-		audience: cfg.Audience, ttl: cfg.TTL, personas: cfg.Personas,
-		garmURL: orDefault(cfg.GarmURL, "http://127.0.0.1:7440"),
+		audience: cfg.Audience, ttl: cfg.TTL, tenant: cfg.Tenant,
+		personas: cfg.Personas,
+		garmURL:  orDefault(cfg.GarmURL, "http://127.0.0.1:7440"),
 	}
 
 	mux := http.NewServeMux()
@@ -195,6 +203,13 @@ func (s *server) serveTokenForPersona(w http.ResponseWriter, user, actor string,
 		"exp":  now.Add(s.ttl).Unix(),
 		"garm": claimFromAuthority(ua, "USER"),
 	}
+	// The SUBJECT's tenant, and only the subject's. A delegated token's
+	// authority is intersected across the chain, but whose data is in scope
+	// is not a matter of intersection: an agent acting for jdoe is working on
+	// jdoe's tenant's data, and there is no second tenant to reconcile.
+	if tenant := s.tenantFor(u); tenant != "" {
+		body["tenant"] = tenant
+	}
 
 	if actor != "" {
 		a, ok := s.personas.Agents[actor]
@@ -225,6 +240,22 @@ func (s *server) serveTokenForPersona(w http.ResponseWriter, user, actor string,
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = fmt.Fprintln(w, token)
+}
+
+// tenantFor resolves the tenant this identity's token carries: the persona's
+// own, then --tenant, then the personas file's. Most specific wins, which is
+// the order every other override in this package uses.
+func (s *server) tenantFor(p persona) string {
+	if p.Tenant != "" {
+		return p.Tenant
+	}
+	if s.tenant != "" {
+		return s.tenant
+	}
+	if s.personas != nil {
+		return s.personas.Tenant
+	}
+	return ""
 }
 
 // claimFromAuthority renders the `garm` claim a role expansion produces.
@@ -343,6 +374,7 @@ func Command() *cobra.Command {
 	var ttl time.Duration
 	var personasPath string
 	var garmURL string
+	var tenant string
 
 	cmd := &cobra.Command{
 		Use:   "idp",
@@ -358,7 +390,7 @@ func Command() *cobra.Command {
 			if err := checkLoopback(addr); err != nil {
 				return err
 			}
-			cfg := Config{Audience: audience, TTL: ttl, GarmURL: garmURL}
+			cfg := Config{Audience: audience, TTL: ttl, GarmURL: garmURL, Tenant: tenant}
 			if personasPath != "" {
 				p, err := loadPersonas(personasPath)
 				if err != nil {
@@ -396,5 +428,8 @@ func Command() *cobra.Command {
 		"the tool plane the UI asks what each principal can see")
 	cmd.Flags().StringVar(&personasPath, "personas", "",
 		"a personas file defining roles, users, agents and who may act for whom")
+	cmd.Flags().StringVar(&tenant, "tenant", "",
+		"Tenant every minted token names, overriding the personas file's. "+
+			"Everything downstream refuses a token with no tenant at all")
 	return cmd
 }

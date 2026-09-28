@@ -360,3 +360,106 @@ func TestTheProxySaysSoWhenGarmIsNotRunning(t *testing.T) {
 			"than look like an empty catalogue", string(body))
 	}
 }
+
+func newTestServer(t *testing.T, cfg Config) *httptest.Server {
+	t.Helper()
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A dev token has to name a tenant, because everything downstream of it
+// refuses one that does not.
+//
+// The STS reads `tenant` off a subject token and refuses to mint when it is
+// empty — confinement to a tenant's own data depends on it flowing from a
+// verified token, so an empty one is a confinement failure rather than a
+// cosmetic gap. A dev IdP that omitted it would make every exchange fail with
+// an access_denied that says nothing about tenants.
+func TestAPersonaTokenNamesTheTenantTheFileDeclares(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Personas: personasFromYAML(t, `
+tenant: bank
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe: { subject: "employee:jdoe", roles: [support-desk] }
+`),
+	})
+
+	claims := claimsOf(t, srv, mint(t, srv, "user=jdoe"))
+	if got := claims["tenant"]; got != "bank" {
+		t.Errorf("tenant = %v, want bank", got)
+	}
+}
+
+// The flag wins over the file, so one personas file serves two environments.
+func TestTheTenantFlagOverridesTheFile(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Tenant:   "acme",
+		Personas: personasFromYAML(t, `
+tenant: bank
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe: { subject: "employee:jdoe", roles: [support-desk] }
+`),
+	})
+
+	claims := claimsOf(t, srv, mint(t, srv, "user=jdoe"))
+	if got := claims["tenant"]; got != "acme" {
+		t.Errorf("tenant = %v, want acme — --tenant must win over the file", got)
+	}
+}
+
+// And a persona wins over both, because a multi-tenant demo is the whole
+// reason a tenant claim is interesting: two personas in two tenants, calling
+// the same tool, must not see each other's rows.
+func TestAPersonaCanNameItsOwnTenant(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Personas: personasFromYAML(t, `
+tenant: bank
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe:  { subject: "employee:jdoe", roles: [support-desk] }
+  zhang: { subject: "employee:zhang", roles: [support-desk], tenant: acme }
+`),
+	})
+
+	if got := claimsOf(t, srv, mint(t, srv, "user=jdoe"))["tenant"]; got != "bank" {
+		t.Errorf("jdoe tenant = %v, want bank", got)
+	}
+	if got := claimsOf(t, srv, mint(t, srv, "user=zhang"))["tenant"]; got != "acme" {
+		t.Errorf("zhang tenant = %v, want acme", got)
+	}
+}
+
+// The delegated form carries it too: the tenant belongs to the SUBJECT, and
+// an agent acting for someone does not change whose data is in scope.
+func TestADelegatedPersonaTokenKeepsTheSubjectsTenant(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Personas: personasFromYAML(t, `
+tenant: bank
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe: { subject: "employee:jdoe", roles: [support-desk] }
+agents:
+  assistant: { subject: "agent:assistant", roles: [support-desk], may_act_for: [jdoe] }
+`),
+	})
+
+	claims := claimsOf(t, srv, mint(t, srv, "user=jdoe&as=assistant"))
+	if got := claims["tenant"]; got != "bank" {
+		t.Errorf("delegated tenant = %v, want bank", got)
+	}
+}

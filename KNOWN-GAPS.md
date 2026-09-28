@@ -20,6 +20,10 @@ the same shape as `garm`'s conformance cases. It is not built.
 Until then the risk is bounded by the claim set being small and the tests on
 both sides naming their expectations explicitly.
 
+- `tenant` is stamped from configuration and never validated against anything.
+  Nothing here knows which tenants exist; a typo mints a token for a tenant
+  that has no data, which reads as an empty result rather than an error.
+
 ## The UI's tool list needs a catalogue surface garmd does not serve
 
 `/tools` mints for a persona and asks garm what that principal can see, which

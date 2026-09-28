@@ -17,6 +17,17 @@ curl -s '127.0.0.1:7450/token?user=bob&as=triage-bot'   # delegated
 Point `garmd` at `http://127.0.0.1:7450/.well-known/jwks.json` and it will
 verify those tokens the same way it verifies your bank's.
 
+### Tokens name a tenant
+
+Every persona token carries a `tenant` claim: the persona's own, else
+`--tenant`, else the `tenant:` at the top of the personas file.
+
+It is not decoration. Confinement to a tenant's own data depends on the value
+flowing from a verified token, so the STS refuses to exchange a token whose
+`tenant` is empty — and a dev IdP that omitted it would make every exchange
+fail with an `access_denied` that says nothing about tenants. The ad-hoc form
+takes `?tenant=` as it always has.
+
 ## Why this is its own repository
 
 It mints tokens. A binary that can mint tokens can assert any identity — any

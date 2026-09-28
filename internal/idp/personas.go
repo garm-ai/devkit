@@ -24,6 +24,14 @@ import (
 // environment at it. The loopback check stops that today, and a management
 // API is an invitation to remove it.
 type personas struct {
+	// Tenant is the tenant every persona in this file belongs to unless it
+	// says otherwise.
+	//
+	// It lives here rather than behind a flag default because a tenant is a
+	// property of the population this file declares, not of the process
+	// serving it — the next personas file somebody writes is not the bank's,
+	// and a constant in the binary would be quietly wrong for it.
+	Tenant string             `yaml:"tenant"`
 	Roles  map[string]role    `yaml:"roles"`
 	Users  map[string]persona `yaml:"users"`
 	Agents map[string]persona `yaml:"agents"`
@@ -59,6 +67,11 @@ type persona struct {
 	// sign. A dev IdP that minted any chain asked of it would teach that
 	// delegation is unconstrained, which is the opposite of true.
 	MayActFor []string `yaml:"may_act_for"`
+
+	// Tenant overrides the file's for this identity. Two personas in two
+	// tenants calling the same tool is the only way to demonstrate that
+	// confinement works at all, and a file-wide value could not express it.
+	Tenant string `yaml:"tenant"`
 }
 
 func loadPersonas(path string) (*personas, error) {

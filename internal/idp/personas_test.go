@@ -40,6 +40,15 @@ func writePersonas(t *testing.T, body string) string {
 	return p
 }
 
+func personasFromYAML(t *testing.T, body string) *personas {
+	t.Helper()
+	p, err := loadPersonas(writePersonas(t, body))
+	if err != nil {
+		t.Fatalf("loading personas: %v", err)
+	}
+	return p
+}
+
 // Holding two roles gives you MORE. Acting for someone gives you LESS. They
 // are opposite operations on the same token, and getting them the same way
 // round would either strip authority from multi-role users or let delegation
@@ -171,5 +180,24 @@ func TestAMisspelledClearanceIsRefusedAtLoad(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "RESTRICTD") {
 		t.Errorf("error %q does not name the offending value", err)
+	}
+}
+
+// KnownFields(true) means a key this struct does not declare is a hard error,
+// which is the right default for an identity file — and the reason adding a
+// key has to come with a test that the file still loads.
+func TestAPersonasFileMayDeclareATenant(t *testing.T) {
+	p := personasFromYAML(t, `
+tenant: bank
+roles:
+  r: { clearance: INTERNAL, verbs: [READ] }
+users:
+  u: { subject: "employee:u", roles: [r], tenant: acme }
+`)
+	if p.Tenant != "bank" {
+		t.Errorf("file tenant = %q, want bank", p.Tenant)
+	}
+	if got := p.Users["u"].Tenant; got != "acme" {
+		t.Errorf("user tenant = %q, want acme", got)
 	}
 }
