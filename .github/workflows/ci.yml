@@ -1,8 +1,10 @@
 # CI for devkit.
 #
-# Two jobs. The first is the ordinary one. The second asserts the boundary
+# Three jobs. The first is the ordinary one. The second asserts the boundary
 # this repository exists to hold — asserted rather than documented, because a
-# single careless import would end it silently.
+# single careless import would end it silently. The third catches a
+# different kind of drift: a compartment or tool set examples/personas.yaml
+# names that the bank catalogue it is meant to illustrate no longer declares.
 name: ci
 
 on:
@@ -59,3 +61,30 @@ jobs:
       # go.mod would be.
       - name: the example personas load
         run: go test ./internal/idp -run TestTheShippedExamplePersonasLoad -count=1
+
+  # examples/personas.yaml is a worked example against bank's vocabulary, and
+  # a name it references but the catalogue does not declare is not an error
+  # anywhere else — the verifying daemon drops an unknown compartment rather
+  # than refusing the token. devkit owns no catalogue of its own, so the
+  # bank one is built fresh here from a checkout of garm-ai/examples (public)
+  # — never read from a committed or downloaded artifact, since that catalogue
+  # is gitignored and generated and a stale copy would make this check
+  # authoritative about the wrong vocabulary.
+  claims:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: checkout examples (public; source of the bank catalogue)
+        uses: actions/checkout@v5
+        with:
+          repository: garm-ai/examples
+          path: upstream-examples
+          token: ''
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+      - name: examples/personas.yaml against a freshly built bank catalogue
+        env:
+          EXAMPLES_DIR: upstream-examples
+        run: mise run claims-check
