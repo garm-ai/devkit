@@ -20,7 +20,8 @@ verify those tokens the same way it verifies your bank's.
 ### Tokens name a tenant
 
 Every persona token carries a `tenant` claim: the persona's own, else
-`--tenant`, else the `tenant:` at the top of the personas file.
+`--tenant`, else the `tenant:` at the top of the personas file —
+`examples/personas.yaml` declares `bank`, so the quickstart above mints it.
 
 It is not decoration. Confinement to a tenant's own data depends on the value
 flowing from a verified token, so the STS refuses to exchange a token whose

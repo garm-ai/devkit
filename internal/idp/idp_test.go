@@ -463,3 +463,25 @@ agents:
 		t.Errorf("delegated tenant = %v, want bank", got)
 	}
 }
+
+// Nothing configured means no claim at all, not an empty one. An empty
+// string is a value the STS would read and refuse; an absent key is the
+// honest shape for "this file never said", and it is what the ad-hoc form
+// has always produced when ?tenant= is not given.
+func TestATokenWithNoTenantConfiguredOmitsTheClaim(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Personas: personasFromYAML(t, `
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe: { subject: "employee:jdoe", roles: [support-desk] }
+`),
+	})
+
+	claims := claimsOf(t, srv, mint(t, srv, "user=jdoe"))
+	if got, present := claims["tenant"]; present {
+		t.Errorf("tenant = %q; with nothing configured the claim must be absent, "+
+			"not stamped empty", got)
+	}
+}
