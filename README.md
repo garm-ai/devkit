@@ -79,6 +79,12 @@ delegation was permitted. The IdP asserts that by agreeing to sign. Try
 `?user=alice&as=triage-bot` — `triage-bot` may act for `bob` only, and minting
 the chain anyway would teach that delegation is unconstrained.
 
+`GET /personas` returns the loaded file as JSON under the same keys the YAML
+uses — `subject`, `roles`, `may_act_for`, `tenant` on a persona; `clearance`,
+`compartments`, `verbs`, `tool_sets` on a role — so a client can be written
+against one spelling. (Before v0.1.1 it encoded Go field names, and the
+picker page showed every persona with no roles.)
+
 It is a file and not a store because everything in it is configuration a pull
 request can argue about. A dev IdP with a CRUD API starts to look like a
 product, and the next step after that is a staging environment pointed at it.

@@ -296,6 +296,65 @@ func TestPersonasAreListedButNotWritable(t *testing.T) {
 	}
 }
 
+// GET /personas speaks the YAML's vocabulary, not Go's. The struct carried
+// yaml tags only, so the endpoint encoded `Subject`, `Roles`, `MayActFor`,
+// and every reader written against the file's spelling — the picker page in
+// this very binary reads `u.roles` — saw personas with no roles at all.
+func TestPersonasAreListedUnderTheirYAMLKeys(t *testing.T) {
+	srv := startIDPWithPersonas(t)
+	resp, err := http.Get(srv.URL + "/personas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	for _, goName := range []string{`"Subject"`, `"Roles"`, `"MayActFor"`, `"Tenant"`, `"Clearance"`, `"ToolSets"`} {
+		if strings.Contains(string(raw), goName) {
+			t.Errorf("GET /personas encodes the Go field name %s", goName)
+		}
+	}
+
+	var body struct {
+		Roles  map[string]map[string]json.RawMessage `json:"roles"`
+		Users  map[string]map[string]json.RawMessage `json:"users"`
+		Agents map[string]map[string]json.RawMessage `json:"agents"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("GET /personas is not the expected shape: %v\n%s", err, raw)
+	}
+	if len(body.Users) == 0 || len(body.Agents) == 0 || len(body.Roles) == 0 {
+		t.Fatalf("the example file has users, agents and roles; got %d/%d/%d", len(body.Users), len(body.Agents), len(body.Roles))
+	}
+	for kind, set := range map[string]map[string]map[string]json.RawMessage{"user": body.Users, "agent": body.Agents, "role": body.Roles} {
+		for name, fields := range set {
+			for key := range fields {
+				if key != strings.ToLower(key) {
+					t.Errorf("%s %q has key %q; keys are lower-case snake_case like the YAML", kind, name, key)
+				}
+			}
+		}
+	}
+	for name, u := range body.Users {
+		for _, want := range []string{"subject", "roles", "may_act_for", "tenant"} {
+			if _, ok := u[want]; !ok {
+				t.Errorf("user %q has no %q key", name, want)
+			}
+		}
+	}
+	for name, a := range body.Agents {
+		if _, ok := a["may_act_for"]; !ok {
+			t.Errorf("agent %q has no may_act_for key", name)
+		}
+	}
+	for name, r := range body.Roles {
+		for _, want := range []string{"clearance", "compartments", "verbs", "tool_sets"} {
+			if _, ok := r[want]; !ok {
+				t.Errorf("role %q has no %q key", name, want)
+			}
+		}
+	}
+}
+
 // The page must reference only its own origin. It is served by a tool whose
 // whole premise is that it works on a laptop with nothing else running, and a
 // CDN reference would make the dev UI silently depend on the internet.

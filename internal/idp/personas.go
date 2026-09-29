@@ -45,20 +45,24 @@ type personas struct {
 // chain. A role reaching the policy chain would be a second vocabulary for
 // answering the same question.
 type role struct {
-	Clearance    string   `yaml:"clearance"`
-	Compartments []string `yaml:"compartments"`
-	Verbs        []string `yaml:"verbs"`
-	ToolSets     []string `yaml:"tool_sets"`
+	Clearance    string   `yaml:"clearance" json:"clearance"`
+	Compartments []string `yaml:"compartments" json:"compartments"`
+	Verbs        []string `yaml:"verbs" json:"verbs"`
+	ToolSets     []string `yaml:"tool_sets" json:"tool_sets"`
 }
 
+// persona carries json tags beside the yaml ones because GET /personas
+// serves it. Without them the endpoint encoded Go field names — `Subject`,
+// `MayActFor` — and every client that read the YAML spelling, including
+// this IdP's own picker page, saw a persona with no roles.
 type persona struct {
 	// Subject is what lands in `sub` and therefore in every ledger row. It
 	// is separate from the map key on purpose: the key is the handle you
 	// type, the subject is the identity that must stay stable when the
 	// handle changes. Real IdPs emit opaque subjects, and a dev tool that
 	// hid that distinction would teach people to key dashboards on names.
-	Subject string   `yaml:"subject"`
-	Roles   []string `yaml:"roles"`
+	Subject string   `yaml:"subject" json:"subject"`
+	Roles   []string `yaml:"roles" json:"roles"`
 
 	// MayActFor lists the users this agent is entitled to act for. It is
 	// enforced when minting and garm NEVER sees it: garm folds a delegation
@@ -66,12 +70,12 @@ type persona struct {
 	// the delegation was permitted. The IdP asserts that by agreeing to
 	// sign. A dev IdP that minted any chain asked of it would teach that
 	// delegation is unconstrained, which is the opposite of true.
-	MayActFor []string `yaml:"may_act_for"`
+	MayActFor []string `yaml:"may_act_for" json:"may_act_for"`
 
 	// Tenant overrides the file's for this identity. Two personas in two
 	// tenants calling the same tool is the only way to demonstrate that
 	// confinement works at all, and a file-wide value could not express it.
-	Tenant string `yaml:"tenant"`
+	Tenant string `yaml:"tenant" json:"tenant"`
 }
 
 func loadPersonas(path string) (*personas, error) {
