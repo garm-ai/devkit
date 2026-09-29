@@ -105,8 +105,8 @@ func TestAMintedTokenIsSignedByTheKeyItServes(t *testing.T) {
 	if body["sub"] != "alice" {
 		t.Errorf("sub = %v, want alice", body["sub"])
 	}
-	if body["iss"] != devIssuer {
-		t.Errorf("iss = %v, want %s", body["iss"], devIssuer)
+	if body["iss"] != DevIssuer {
+		t.Errorf("iss = %v, want %s", body["iss"], DevIssuer)
 	}
 	if body["aud"] != "garm" {
 		t.Errorf("aud = %v, want garm", body["aud"])

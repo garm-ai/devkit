@@ -25,16 +25,23 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
-
-	"github.com/garm-ai/devkit/internal/idp"
 )
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	// The signal context, so a long-running subcommand — `idp` is the one
+	// today — drains on SIGINT or SIGTERM rather than dying mid-request.
+	// idp.Serve drains on a cancelled context and on nothing else, so this
+	// is the only shutdown path there is.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "garmdev:", err)
 		os.Exit(1)
 	}
@@ -60,6 +67,6 @@ func newRootCmd() *cobra.Command {
 			return fmt.Errorf("a subcommand is required; see `garmdev --help`")
 		},
 	}
-	root.AddCommand(idp.Command())
+	root.AddCommand(newIdPCmd())
 	return root
 }

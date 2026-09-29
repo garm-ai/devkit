@@ -12,7 +12,7 @@ import (
 // to parse is worse than no example: it reads as the tool being broken rather
 // than the file, and it is the one file here nobody re-reads before trusting.
 func TestTheShippedExamplePersonasLoad(t *testing.T) {
-	path := filepath.Join("..", "..", "examples", "personas.yaml")
+	path := filepath.Join("..", "examples", "personas.yaml")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("the example personas file is missing: %v", err)
 	}

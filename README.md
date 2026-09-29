@@ -55,6 +55,18 @@ no authentication on `/token` and there should not be — the whole point is
 that it hands out identities freely, which is only safe when nothing else can
 ask.
 
+### Running it in-process
+
+`garmdev idp` is the way you run it. `idp.Serve(ctx, idp.Config{…})` is the
+same program with the flag parsing taken off the front — `cmd/garmdev` fills
+a `Config` and calls it, and there is one implementation behind both — and it
+exists so `garm-ai/stack`'s `garmstack` can run the IdP alongside garmd, the
+STS and agentd as goroutines in one process for local development. That is
+the only kind of process it belongs in: everything above about a token minter
+applies to `garmstack` too, which is why that single-process mode is never for
+production. `idp.DevIssuer` is the `iss` those tokens carry, exported because
+everything that must trust them has to name it.
+
 ## Personas
 
 Roles, users, agents and who may act for whom, in a YAML file — see

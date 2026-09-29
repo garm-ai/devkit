@@ -10,6 +10,13 @@
 // token body below is written as plain JSON, and this file knows nothing
 // about the types that will read it.
 //
+// The `garmdev idp` subcommand is the way you run this. Serve is exported —
+// and this package therefore sits outside internal/ — so that garm-ai/stack's
+// garmstack can run it as one component of a whole stack in a single process
+// for local development. That is the only kind of process it belongs in: it
+// mints any identity asked of it, which is why it refuses to bind anything
+// but loopback.
+//
 // That leaves one hazard, drift: the body and the verifier disagreeing
 // silently until every dev token stops verifying for a reason nobody can
 // see. See KNOWN-GAPS.md — it is a named gap, not a solved problem.
@@ -23,22 +30,38 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
-	"github.com/spf13/cobra"
 )
 
-// devIssuer is the `iss` every token from this server carries. It is not a
-// URL that resolves, and that is deliberate: nothing should be able to
-// discover this issuer, only be configured to trust it.
-const devIssuer = "https://garmdev.invalid/idp"
+// DevIssuer is the `iss` every token from this server carries unless
+// Config.Issuer says otherwise. It is not a URL that resolves, and that is
+// deliberate: nothing should be able to discover this issuer, only be
+// configured to trust it. It is exported because every process that must
+// TRUST these tokens — garmd, the STS, and garmstack configuring both — has
+// to name it.
+const DevIssuer = "https://garmdev.invalid/idp"
 
 type Config struct {
+	// Addr is the loopback address to serve on. Serve refuses anything
+	// else: see checkLoopback.
+	Addr string
+
 	Audience string
 	TTL      time.Duration
+
+	// Issuer is the `iss` minted tokens carry. Empty means DevIssuer,
+	// which is what the binary always uses — there is no --issuer flag,
+	// because a dev minter that can claim to be somebody else's issuer is
+	// a worse thing to leave lying around than one that cannot.
+	Issuer string
+
+	// PersonasPath is the personas file Serve loads, if any. New takes the
+	// loaded form below instead; a caller outside this package gives the
+	// path and lets Serve read it.
+	PersonasPath string
 
 	// Personas, when configured, add /personas and the ?user= / ?as= form
 	// of /token. Without them the raw ?clearance=&compartments= form is
@@ -47,6 +70,11 @@ type Config struct {
 
 	// GarmURL is the tool plane the UI asks what a principal can see.
 	GarmURL string
+
+	// OnListen is told the address the server actually bound, once it has.
+	// A caller that passed :0 — or a command that prints a banner naming
+	// the address — has no other way to learn it.
+	OnListen func(addr string)
 
 	// Tenant overrides the personas file's tenant for every identity this
 	// server mints. Everything downstream refuses a token with no tenant —
@@ -60,6 +88,7 @@ type server struct {
 	kid      string
 	jwks     []byte
 	audience string
+	issuer   string
 	ttl      time.Duration
 	tenant   string
 	personas *personas
@@ -72,6 +101,9 @@ func New(cfg Config) (http.Handler, error) {
 	}
 	if cfg.TTL == 0 {
 		cfg.TTL = time.Hour
+	}
+	if cfg.Issuer == "" {
+		cfg.Issuer = DevIssuer
 	}
 
 	// An ephemeral key per run. Tokens do not survive a restart, which is
@@ -96,7 +128,7 @@ func New(cfg Config) (http.Handler, error) {
 
 	s := &server{
 		key: key, kid: kid, jwks: jwks,
-		audience: cfg.Audience, ttl: cfg.TTL, tenant: cfg.Tenant,
+		audience: cfg.Audience, issuer: cfg.Issuer, ttl: cfg.TTL, tenant: cfg.Tenant,
 		personas: cfg.Personas,
 		garmURL:  orDefault(cfg.GarmURL, "http://127.0.0.1:7440"),
 	}
@@ -146,7 +178,7 @@ func (s *server) serveToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body := map[string]any{
-		"iss":  devIssuer,
+		"iss":  s.issuer,
 		"sub":  orDefault(q.Get("sub"), "dev-user"),
 		"aud":  s.audience,
 		"jti":  fmt.Sprintf("garmdev-%d", now.UnixNano()),
@@ -195,7 +227,7 @@ func (s *server) serveTokenForPersona(w http.ResponseWriter, user, actor string,
 
 	ua := s.personas.expand(u)
 	body := map[string]any{
-		"iss":  devIssuer,
+		"iss":  s.issuer,
 		"sub":  orDefault(u.Subject, "user:"+user),
 		"aud":  s.audience,
 		"jti":  fmt.Sprintf("garmdev-%d", now.UnixNano()),
@@ -366,70 +398,4 @@ func checkLoopback(addr string) error {
 			"asked of it and must not be reachable off this machine", host)
 	}
 	return nil
-}
-
-func Command() *cobra.Command {
-	var addr string
-	var audience string
-	var ttl time.Duration
-	var personasPath string
-	var garmURL string
-	var tenant string
-
-	cmd := &cobra.Command{
-		Use:   "idp",
-		Short: "Run a local identity provider for development",
-		Long: "Serves a JWKS and mints tokens on demand, so a local garm can verify\n" +
-			"real signatures without an identity provider.\n\n" +
-			"It mints ANY identity it is asked for, with no authentication, which is\n" +
-			"the point and also why it refuses to bind anything but loopback. Never\n" +
-			"point a deployment at it: garm would then trust an issuer that hands out\n" +
-			"clearances to whoever asks.",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := checkLoopback(addr); err != nil {
-				return err
-			}
-			cfg := Config{Audience: audience, TTL: ttl, GarmURL: garmURL, Tenant: tenant}
-			if personasPath != "" {
-				p, err := loadPersonas(personasPath)
-				if err != nil {
-					return err
-				}
-				cfg.Personas = p
-			}
-			h, err := New(cfg)
-			if err != nil {
-				return err
-			}
-			ln, err := net.Listen("tcp", addr)
-			if err != nil {
-				return fmt.Errorf("listen %s: %w", addr, err)
-			}
-			base := "http://" + ln.Addr().String()
-			fmt.Fprintf(os.Stderr, `garmdev idp — DEVELOPMENT ONLY, mints any identity asked of it
-
-  jwks_url  %s/.well-known/jwks.json
-  issuer    %s
-  audience  %s
-
-  UI:       %s
-  a token:  curl -s '%s/token?user=alice'
-  delegated: curl -s '%s/token?user=bob&as=triage-bot'
-
-`, base, devIssuer, audience, base, base, base)
-			return http.Serve(ln, h)
-		},
-	}
-	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:7450", "loopback address to serve on")
-	cmd.Flags().StringVar(&audience, "audience", "garm", "the aud minted tokens carry")
-	cmd.Flags().DurationVar(&ttl, "ttl", time.Hour, "how long minted tokens are valid")
-	cmd.Flags().StringVar(&garmURL, "garm-url", "http://127.0.0.1:7440",
-		"the tool plane the UI asks what each principal can see")
-	cmd.Flags().StringVar(&personasPath, "personas", "",
-		"a personas file defining roles, users, agents and who may act for whom")
-	cmd.Flags().StringVar(&tenant, "tenant", "",
-		"Tenant every minted token names, overriding the personas file's. "+
-			"Everything downstream refuses a token with no tenant at all")
-	return cmd
 }

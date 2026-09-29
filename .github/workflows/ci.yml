@@ -60,7 +60,7 @@ jobs:
       # this module. It is asserted there because that is where the violating
       # go.mod would be.
       - name: the example personas load
-        run: go test ./internal/idp -run TestTheShippedExamplePersonasLoad -count=1
+        run: go test ./idp -run TestTheShippedExamplePersonasLoad -count=1
 
   # examples/personas.yaml is a worked example against bank's vocabulary, and
   # a name it references but the catalogue does not declare is not an error
