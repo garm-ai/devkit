@@ -17,6 +17,18 @@ curl -s '127.0.0.1:7450/token?user=bob&as=triage-bot'   # delegated
 Point `garmd` at `http://127.0.0.1:7450/.well-known/jwks.json` and it will
 verify those tokens the same way it verifies your bank's.
 
+### Tokens name a tenant
+
+Every persona token carries a `tenant` claim: the persona's own, else
+`--tenant`, else the `tenant:` at the top of the personas file —
+`examples/personas.yaml` declares `bank`, so the quickstart above mints it.
+
+It is not decoration. Confinement to a tenant's own data depends on the value
+flowing from a verified token, so the STS refuses to exchange a token whose
+`tenant` is empty — and a dev IdP that omitted it would make every exchange
+fail with an `access_denied` that says nothing about tenants. The ad-hoc form
+takes `?tenant=` as it always has.
+
 ## Why this is its own repository
 
 It mints tokens. A binary that can mint tokens can assert any identity — any
@@ -43,6 +55,18 @@ no authentication on `/token` and there should not be — the whole point is
 that it hands out identities freely, which is only safe when nothing else can
 ask.
 
+### Running it in-process
+
+`garmdev idp` is the way you run it. `idp.Serve(ctx, idp.Config{…})` is the
+same program with the flag parsing taken off the front — `cmd/garmdev` fills
+a `Config` and calls it, and there is one implementation behind both — and it
+exists so `garm-ai/stack`'s `garmstack` can run the IdP alongside garmd, the
+STS and agentd as goroutines in one process for local development. That is
+the only kind of process it belongs in: everything above about a token minter
+applies to `garmstack` too, which is why that single-process mode is never for
+production. `idp.DevIssuer` is the `iss` those tokens carry, exported because
+everything that must trust them has to name it.
+
 ## Personas
 
 Roles, users, agents and who may act for whom, in a YAML file — see
@@ -66,6 +90,12 @@ a chain it is given and can only narrow it, but it cannot know whether the
 delegation was permitted. The IdP asserts that by agreeing to sign. Try
 `?user=alice&as=triage-bot` — `triage-bot` may act for `bob` only, and minting
 the chain anyway would teach that delegation is unconstrained.
+
+`GET /personas` returns the loaded file as JSON under the same keys the YAML
+uses — `subject`, `roles`, `may_act_for`, `tenant` on a persona; `clearance`,
+`compartments`, `verbs`, `tool_sets` on a role — so a client can be written
+against one spelling. (Before v0.1.1 it encoded Go field names, and the
+picker page showed every persona with no roles.)
 
 It is a file and not a store because everything in it is configuration a pull
 request can argue about. A dev IdP with a CRUD API starts to look like a

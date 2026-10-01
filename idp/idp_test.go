@@ -105,8 +105,8 @@ func TestAMintedTokenIsSignedByTheKeyItServes(t *testing.T) {
 	if body["sub"] != "alice" {
 		t.Errorf("sub = %v, want alice", body["sub"])
 	}
-	if body["iss"] != devIssuer {
-		t.Errorf("iss = %v, want %s", body["iss"], devIssuer)
+	if body["iss"] != DevIssuer {
+		t.Errorf("iss = %v, want %s", body["iss"], DevIssuer)
 	}
 	if body["aud"] != "garm" {
 		t.Errorf("aud = %v, want garm", body["aud"])
@@ -296,6 +296,65 @@ func TestPersonasAreListedButNotWritable(t *testing.T) {
 	}
 }
 
+// GET /personas speaks the YAML's vocabulary, not Go's. The struct carried
+// yaml tags only, so the endpoint encoded `Subject`, `Roles`, `MayActFor`,
+// and every reader written against the file's spelling — the picker page in
+// this very binary reads `u.roles` — saw personas with no roles at all.
+func TestPersonasAreListedUnderTheirYAMLKeys(t *testing.T) {
+	srv := startIDPWithPersonas(t)
+	resp, err := http.Get(srv.URL + "/personas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	for _, goName := range []string{`"Subject"`, `"Roles"`, `"MayActFor"`, `"Tenant"`, `"Clearance"`, `"ToolSets"`} {
+		if strings.Contains(string(raw), goName) {
+			t.Errorf("GET /personas encodes the Go field name %s", goName)
+		}
+	}
+
+	var body struct {
+		Roles  map[string]map[string]json.RawMessage `json:"roles"`
+		Users  map[string]map[string]json.RawMessage `json:"users"`
+		Agents map[string]map[string]json.RawMessage `json:"agents"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("GET /personas is not the expected shape: %v\n%s", err, raw)
+	}
+	if len(body.Users) == 0 || len(body.Agents) == 0 || len(body.Roles) == 0 {
+		t.Fatalf("the example file has users, agents and roles; got %d/%d/%d", len(body.Users), len(body.Agents), len(body.Roles))
+	}
+	for kind, set := range map[string]map[string]map[string]json.RawMessage{"user": body.Users, "agent": body.Agents, "role": body.Roles} {
+		for name, fields := range set {
+			for key := range fields {
+				if key != strings.ToLower(key) {
+					t.Errorf("%s %q has key %q; keys are lower-case snake_case like the YAML", kind, name, key)
+				}
+			}
+		}
+	}
+	for name, u := range body.Users {
+		for _, want := range []string{"subject", "roles", "may_act_for", "tenant"} {
+			if _, ok := u[want]; !ok {
+				t.Errorf("user %q has no %q key", name, want)
+			}
+		}
+	}
+	for name, a := range body.Agents {
+		if _, ok := a["may_act_for"]; !ok {
+			t.Errorf("agent %q has no may_act_for key", name)
+		}
+	}
+	for name, r := range body.Roles {
+		for _, want := range []string{"clearance", "compartments", "verbs", "tool_sets"} {
+			if _, ok := r[want]; !ok {
+				t.Errorf("role %q has no %q key", name, want)
+			}
+		}
+	}
+}
+
 // The page must reference only its own origin. It is served by a tool whose
 // whole premise is that it works on a laptop with nothing else running, and a
 // CDN reference would make the dev UI silently depend on the internet.
@@ -358,5 +417,130 @@ func TestTheProxySaysSoWhenGarmIsNotRunning(t *testing.T) {
 	if !strings.Contains(string(body), "could not reach garm") {
 		t.Errorf("an unreachable garm produced %q; it should say so plainly rather "+
 			"than look like an empty catalogue", string(body))
+	}
+}
+
+func newTestServer(t *testing.T, cfg Config) *httptest.Server {
+	t.Helper()
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A dev token has to name a tenant, because everything downstream of it
+// refuses one that does not.
+//
+// The STS reads `tenant` off a subject token and refuses to mint when it is
+// empty — confinement to a tenant's own data depends on it flowing from a
+// verified token, so an empty one is a confinement failure rather than a
+// cosmetic gap. A dev IdP that omitted it would make every exchange fail with
+// an access_denied that says nothing about tenants.
+func TestAPersonaTokenNamesTheTenantTheFileDeclares(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Personas: personasFromYAML(t, `
+tenant: bank
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe: { subject: "employee:jdoe", roles: [support-desk] }
+`),
+	})
+
+	claims := claimsOf(t, srv, mint(t, srv, "user=jdoe"))
+	if got := claims["tenant"]; got != "bank" {
+		t.Errorf("tenant = %v, want bank", got)
+	}
+}
+
+// The flag wins over the file, so one personas file serves two environments.
+func TestTheTenantFlagOverridesTheFile(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Tenant:   "acme",
+		Personas: personasFromYAML(t, `
+tenant: bank
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe: { subject: "employee:jdoe", roles: [support-desk] }
+`),
+	})
+
+	claims := claimsOf(t, srv, mint(t, srv, "user=jdoe"))
+	if got := claims["tenant"]; got != "acme" {
+		t.Errorf("tenant = %v, want acme — --tenant must win over the file", got)
+	}
+}
+
+// And a persona wins over both, because a multi-tenant demo is the whole
+// reason a tenant claim is interesting: two personas in two tenants, calling
+// the same tool, must not see each other's rows.
+func TestAPersonaCanNameItsOwnTenant(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Personas: personasFromYAML(t, `
+tenant: bank
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe:  { subject: "employee:jdoe", roles: [support-desk] }
+  zhang: { subject: "employee:zhang", roles: [support-desk], tenant: acme }
+`),
+	})
+
+	if got := claimsOf(t, srv, mint(t, srv, "user=jdoe"))["tenant"]; got != "bank" {
+		t.Errorf("jdoe tenant = %v, want bank", got)
+	}
+	if got := claimsOf(t, srv, mint(t, srv, "user=zhang"))["tenant"]; got != "acme" {
+		t.Errorf("zhang tenant = %v, want acme", got)
+	}
+}
+
+// The delegated form carries it too: the tenant belongs to the SUBJECT, and
+// an agent acting for someone does not change whose data is in scope.
+func TestADelegatedPersonaTokenKeepsTheSubjectsTenant(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Personas: personasFromYAML(t, `
+tenant: bank
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe: { subject: "employee:jdoe", roles: [support-desk] }
+agents:
+  assistant: { subject: "agent:assistant", roles: [support-desk], may_act_for: [jdoe] }
+`),
+	})
+
+	claims := claimsOf(t, srv, mint(t, srv, "user=jdoe&as=assistant"))
+	if got := claims["tenant"]; got != "bank" {
+		t.Errorf("delegated tenant = %v, want bank", got)
+	}
+}
+
+// Nothing configured means no claim at all, not an empty one. An empty
+// string is a value the STS would read and refuse; an absent key is the
+// honest shape for "this file never said", and it is what the ad-hoc form
+// has always produced when ?tenant= is not given.
+func TestATokenWithNoTenantConfiguredOmitsTheClaim(t *testing.T) {
+	srv := newTestServer(t, Config{
+		Audience: "garm",
+		Personas: personasFromYAML(t, `
+roles:
+  support-desk: { clearance: INTERNAL, compartments: [pii-contact], verbs: [READ] }
+users:
+  jdoe: { subject: "employee:jdoe", roles: [support-desk] }
+`),
+	})
+
+	claims := claimsOf(t, srv, mint(t, srv, "user=jdoe"))
+	if got, present := claims["tenant"]; present {
+		t.Errorf("tenant = %q; with nothing configured the claim must be absent, "+
+			"not stamped empty", got)
 	}
 }

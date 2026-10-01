@@ -10,6 +10,10 @@
 #   curl -s '127.0.0.1:7450/token?user=alice'
 #   curl -s '127.0.0.1:7450/token?user=bob&as=triage-bot'   # delegated
 
+# Every token names this tenant unless a persona says otherwise: the STS
+# refuses to exchange a token with none, so a quickstart without it fails.
+tenant: bank
+
 # A role is a BUNDLE of claims, and bundling is an identity provider's job.
 # garm never sees a role — it receives the clearance, compartments and verbs a
 # role expands to. This is exactly how a real IdP works, and it is why mapping
