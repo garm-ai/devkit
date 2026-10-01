@@ -563,9 +563,9 @@ func tokenStatus(t *testing.T, srv *httptest.Server, query string) (int, string)
 }
 
 // A service principal is a thing the platform needs and this IdP could not
-// mint: a runner calling tasksd on its own behalf. Without a kind on the
-// token every identity minted here is implicitly a person, so no service
-// principal existed anywhere.
+// mint: a component acting as ITSELF rather than for a person. Without a kind
+// on the token every identity minted here is implicitly a person, so no
+// service principal existed anywhere.
 func TestAServiceTokenNamesTheServiceKind(t *testing.T) {
 	srv := startIDP(t)
 	body := claimsOf(t, srv, mint(t, srv,
@@ -623,11 +623,12 @@ func TestATokenWithNoKindRequestedCarriesNoKindClaim(t *testing.T) {
 
 // The check this IdP exists to make, because nothing downstream can.
 //
-// garmd's normaliseKind returns the empty string for a value it does not
-// recognise: a typo'd kind is indistinguishable, there, from a token that
-// asked for none. The runner minted that way is then refused by tasksd for
-// not being a service, and nothing in that message points at the mint URL.
-// This is the last place that can still tell the two apart.
+// A verifier that normalises an unrecognised kind to the empty string cannot
+// tell a typo from a token that asked for no kind at all — and garm's does
+// exactly that. So the identity is accepted, is simply not a service, and is
+// refused later by whatever required one, in a message that points at the call
+// rather than at the mint. This is the last place that can still tell the two
+// apart, which is why the refusal belongs here.
 func TestAnUnrecognisedKindIsRefusedRatherThanPassedThrough(t *testing.T) {
 	srv := startIDP(t)
 	for _, bad := range []string{"srvice", "PRINCIPAL_KIND_UNSPECIFIED", "UNSPECIFIED", "workflow"} {
