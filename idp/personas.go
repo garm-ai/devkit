@@ -240,6 +240,33 @@ func canonicalClearance(s string) string {
 	return "CLEARANCE_" + bareClearance(s)
 }
 
+// canonicalKind is the spelling of a principal kind that goes on the wire,
+// and it REFUSES what it does not recognise.
+//
+// The verifier maps `garm.kind` onto a PRINCIPAL_KIND_* name and returns
+// nothing at all for a value it does not know, with no error and nothing told
+// to the caller. A misspelled kind and an absent one are therefore the same
+// token downstream: `?kind=srvice` verifies, carries no kind, and is refused
+// much later by a service saying the caller is not a service — and nothing in
+// that message points at the mint URL. This is the last place that can still
+// tell "no kind was asked for" from "a kind was asked for and misspelled", so
+// it is where the two are told apart.
+//
+// UNSPECIFIED is refused for the same reason rather than passed through: it
+// is the value the verifier reads as no kind at all.
+//
+// The returned spelling is bare and upper-case — USER, AGENT, SERVICE — which
+// is what the persona path already mints, so one claim has one form however
+// it was asked for.
+func canonicalKind(s string) (string, error) {
+	switch bare := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(s)), "PRINCIPAL_KIND_"); bare {
+	case "USER", "AGENT", "SERVICE":
+		return bare, nil
+	default:
+		return "", fmt.Errorf("kind %q is not one of user, agent, service", s)
+	}
+}
+
 func sortedSet(m map[string]bool) []string {
 	if len(m) == 0 {
 		return nil

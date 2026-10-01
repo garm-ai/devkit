@@ -29,6 +29,38 @@ flowing from a verified token, so the STS refuses to exchange a token whose
 fail with an `access_denied` that says nothing about tenants. The ad-hoc form
 takes `?tenant=` as it always has.
 
+### Tokens can name a principal kind
+
+`?kind=` puts a principal kind on the token — `user`, `agent` or `service` —
+as `garm.kind`, which is where the verifier reads it:
+
+```
+curl -s '127.0.0.1:7450/token?kind=service&sub=service:agentd&tenant=bank&verbs=VERB_READ,VERB_WRITE'
+```
+
+That is how a **service** principal gets minted at all: a runner calling a
+service on its own behalf, rather than a person or an agent acting for one.
+Before this parameter every token from here was implicitly a person, so no
+service principal existed anywhere to test against.
+
+Three rules come with it:
+
+- **Asking for no kind mints no kind**, exactly as before. The verifier reads
+  an absent `garm.kind` as a principal that never stated one, which is what
+  every token from here has always been; defaulting it would change which
+  principal all of them resolve to. Persona tokens are unaffected — they
+  already carry `USER`, and `?as=` adds `AGENT` on the actor.
+- **A misspelled kind is refused**, with the value named. The verifier maps an
+  unknown kind to nothing at all, so `?kind=srvice` would verify, carry no
+  kind, and be refused much later by a service saying the caller is not a
+  service — with nothing pointing at the typo. This is the last place that can
+  tell "no kind was asked for" from "a kind was asked for and misspelled".
+- **A service token takes no `act` chain and must name a tenant.** A service
+  calls on its own behalf, and a chain baked into its identity would make
+  every call it ever makes look delegated; the chain belongs on the call. The
+  tenant is required for the reason above — the STS refuses to exchange a
+  token without one — and comes from `?tenant=` or `--tenant`.
+
 ## Why this is its own repository
 
 It mints tokens. A binary that can mint tokens can assert any identity — any

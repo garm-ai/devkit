@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -542,5 +543,140 @@ users:
 	if got, present := claims["tenant"]; present {
 		t.Errorf("tenant = %q; with nothing configured the claim must be absent, "+
 			"not stamped empty", got)
+	}
+}
+
+// tokenStatus asks for a token and returns the status and body rather than
+// failing on a non-200, which is what the refusals below assert.
+func tokenStatus(t *testing.T, srv *httptest.Server, query string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(srv.URL + "/token?" + query)
+	if err != nil {
+		t.Fatalf("GET /token: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the response: %v", err)
+	}
+	return resp.StatusCode, string(raw)
+}
+
+// A service principal is a thing the platform needs and this IdP could not
+// mint: a runner calling tasksd on its own behalf. Without a kind on the
+// token every identity minted here is implicitly a person, so no service
+// principal existed anywhere.
+func TestAServiceTokenNamesTheServiceKind(t *testing.T) {
+	srv := startIDP(t)
+	body := claimsOf(t, srv, mint(t, srv,
+		"kind=service&sub=service:agentd&tenant=bank&verbs=VERB_READ,VERB_WRITE"))
+
+	if body["sub"] != "service:agentd" {
+		t.Errorf("sub = %v, want service:agentd", body["sub"])
+	}
+	if got := garmClaimIn(t, body)["kind"]; got != "SERVICE" {
+		t.Errorf("kind = %v, want SERVICE; garmd reads garm.kind and maps it onto "+
+			"PRINCIPAL_KIND_SERVICE", got)
+	}
+	// A runner's agent chain is added per call by the platform, not baked
+	// into its identity. A service token carrying one would make every call
+	// it ever makes look delegated.
+	if _, present := body["act"]; present {
+		t.Errorf("a service token carries an act chain: %v", body["act"])
+	}
+	if got := body["tenant"]; got != "bank" {
+		t.Errorf("tenant = %v, want bank", got)
+	}
+}
+
+// The spellings garmd accepts, accepted here too, and all canonicalised to
+// the one form the persona path already mints.
+func TestEveryAcceptedKindSpellingMintsTheEnumName(t *testing.T) {
+	srv := startIDP(t)
+	for in, want := range map[string]string{
+		"service":                "SERVICE",
+		"SERVICE":                "SERVICE",
+		"PRINCIPAL_KIND_SERVICE": "SERVICE",
+		" Service ":              "SERVICE",
+		"user":                   "USER",
+		"agent":                  "AGENT",
+	} {
+		body := claimsOf(t, srv, mint(t, srv, "kind="+url.QueryEscape(in)+"&sub=s&tenant=bank"))
+		if got := garmClaimIn(t, body)["kind"]; got != want {
+			t.Errorf("kind=%q minted %v, want %s", in, got, want)
+		}
+	}
+}
+
+// The property every existing caller depends on: asking for no kind mints
+// exactly what it minted before there was one. An absent kind is how garmd
+// has always read these tokens, and stamping one by default would change the
+// principal every persona and every ad-hoc token resolves to.
+func TestATokenWithNoKindRequestedCarriesNoKindClaim(t *testing.T) {
+	srv := startIDP(t)
+	body := claimsOf(t, srv, mint(t, srv, "sub=alice&clearance=CLEARANCE_CONFIDENTIAL"))
+	if got, present := garmClaimIn(t, body)["kind"]; present {
+		t.Errorf("kind = %q; with no kind asked for the claim must be absent, not "+
+			"defaulted — every caller that predates this parameter relies on it", got)
+	}
+}
+
+// The check this IdP exists to make, because nothing downstream can.
+//
+// garmd's normaliseKind returns the empty string for a value it does not
+// recognise: a typo'd kind is indistinguishable, there, from a token that
+// asked for none. The runner minted that way is then refused by tasksd for
+// not being a service, and nothing in that message points at the mint URL.
+// This is the last place that can still tell the two apart.
+func TestAnUnrecognisedKindIsRefusedRatherThanPassedThrough(t *testing.T) {
+	srv := startIDP(t)
+	for _, bad := range []string{"srvice", "PRINCIPAL_KIND_UNSPECIFIED", "UNSPECIFIED", "workflow"} {
+		status, body := tokenStatus(t, srv, "kind="+url.QueryEscape(bad)+"&sub=s&tenant=bank")
+		if status != http.StatusBadRequest {
+			t.Errorf("kind=%q minted with status %d; a typo must not quietly produce a "+
+				"token with no kind at all", bad, status)
+			continue
+		}
+		if !strings.Contains(body, bad) {
+			t.Errorf("the refusal of kind=%q does not name the value: %s", bad, body)
+		}
+	}
+}
+
+// A service calls on its OWN behalf; that is what distinguishes it from an
+// agent. The chain belongs on the call, not in the identity.
+func TestAServiceTokenIsRefusedAnActChain(t *testing.T) {
+	srv := startIDP(t)
+	status, body := tokenStatus(t, srv, "kind=service&sub=service:agentd&tenant=bank&act=user:alice")
+	if status != http.StatusBadRequest {
+		t.Fatalf("status %d; a service token with a delegation chain baked in would "+
+			"make every call it makes look delegated", status)
+	}
+	if !strings.Contains(body, "act") {
+		t.Errorf("the refusal does not name the act chain: %s", body)
+	}
+}
+
+// No tenant means no tenant claim, and the STS refuses to exchange a token
+// without one — the bug this repository already fixed for personas. A service
+// principal reaches the same wall, so it is refused at mint time where the
+// message can still say why.
+func TestAServiceTokenMustNameATenant(t *testing.T) {
+	bare := startIDP(t)
+	status, body := tokenStatus(t, bare, "kind=service&sub=service:agentd")
+	if status != http.StatusBadRequest {
+		t.Fatalf("status %d; a service token with no tenant verifies and then fails "+
+			"every exchange with an access_denied that says nothing about tenants", status)
+	}
+	if !strings.Contains(body, "tenant") {
+		t.Errorf("the refusal does not name the tenant: %s", body)
+	}
+
+	// Configured once for the process, it needs no query parameter: the same
+	// order of precedence the persona path uses.
+	configured := newTestServer(t, Config{Audience: "garm", Tenant: "acme"})
+	claims := claimsOf(t, configured, mint(t, configured, "kind=service&sub=service:agentd"))
+	if got := claims["tenant"]; got != "acme" {
+		t.Errorf("tenant = %v, want acme from --tenant", got)
 	}
 }

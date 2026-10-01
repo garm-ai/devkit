@@ -70,6 +70,7 @@ func banner(w io.Writer, bound, audience string) {
   UI:       %s
   a token:  curl -s '%s/token?user=alice'
   delegated: curl -s '%s/token?user=bob&as=triage-bot'
+  a service: curl -s '%s/token?kind=service&sub=service:agentd&tenant=bank'
 
-`, base, idp.DevIssuer, audience, base, base, base)
+`, base, idp.DevIssuer, audience, base, base, base, base)
 }
