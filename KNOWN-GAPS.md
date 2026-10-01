@@ -20,6 +20,10 @@ the same shape as `garm`'s conformance cases. It is not built.
 Until then the risk is bounded by the claim set being small and the tests on
 both sides naming their expectations explicitly.
 
+- `garm.kind` is refused here when it is misspelled, and that check exists
+  only here. The verifier maps an unrecognised kind to no kind at all without
+  saying so, so a second minter — or a hand-rolled curl against a different
+  tool — still has the silent path this one closed.
 - `tenant` is stamped from configuration and never validated against anything.
   Nothing here knows which tenants exist; a typo mints a token for a tenant
   that has no data, which reads as an empty result rather than an error.

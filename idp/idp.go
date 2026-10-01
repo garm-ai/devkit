@@ -177,6 +177,54 @@ func (s *server) serveToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The principal kind. Absent means absent: a token nobody asked a kind
+	// for must carry none, because that is how every caller that predates
+	// this parameter is already read, and stamping a default would change
+	// which principal each of those tokens resolves to.
+	//
+	// A value that IS given is checked here rather than passed through — see
+	// canonicalKind for why this is the only place that can.
+	var kind string
+	if raw := q.Get("kind"); raw != "" {
+		k, err := canonicalKind(raw)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		kind = k
+	}
+
+	tenant := q.Get("tenant")
+	if kind == "SERVICE" {
+		// A service calls on its OWN behalf; that is what distinguishes it
+		// from an agent. A chain baked into the identity would make every
+		// call that service ever makes look delegated, and a runner's chain
+		// is added per call by the platform anyway.
+		if actor := q.Get("act"); actor != "" {
+			http.Error(w, fmt.Sprintf(
+				"a service token may not carry an act chain (act=%q); a service calls "+
+					"on its own behalf, and the delegation chain belongs on the call "+
+					"rather than in the identity", actor), http.StatusBadRequest)
+			return
+		}
+		if tenant == "" {
+			// Falling back only for a service, not for every ad-hoc token:
+			// a --tenant that suddenly started stamping tokens that have
+			// never carried one would change every existing caller.
+			tenant = s.tenantFor("")
+		}
+		if tenant == "" {
+			// No tenant means no tenant claim, which the STS refuses to
+			// exchange — confinement depends on the value flowing from a
+			// verified token. Refused here, where the message can say that,
+			// rather than later as an access_denied that mentions no tenant.
+			http.Error(w, "a service token must name a tenant: pass ?tenant=, or start "+
+				"the IdP with --tenant; everything downstream refuses a token with none",
+				http.StatusBadRequest)
+			return
+		}
+	}
+
 	body := map[string]any{
 		"iss":  s.issuer,
 		"sub":  orDefault(q.Get("sub"), "dev-user"),
@@ -184,9 +232,9 @@ func (s *server) serveToken(w http.ResponseWriter, r *http.Request) {
 		"jti":  fmt.Sprintf("garmdev-%d", now.UnixNano()),
 		"iat":  now.Unix(),
 		"exp":  now.Add(s.ttl).Unix(),
-		"garm": garmClaim(q.Get("clearance"), q.Get("compartments"), q.Get("verbs"), q.Get("tool_sets")),
+		"garm": garmClaim(kind, q.Get("clearance"), q.Get("compartments"), q.Get("verbs"), q.Get("tool_sets")),
 	}
-	if tenant := q.Get("tenant"); tenant != "" {
+	if tenant != "" {
 		body["tenant"] = tenant
 	}
 	// The `act` chain: who is ACTING for the subject. Folding takes the
@@ -196,6 +244,10 @@ func (s *server) serveToken(w http.ResponseWriter, r *http.Request) {
 		body["act"] = map[string]any{
 			"sub": actor,
 			"garm": garmClaim(
+				// No kind on the actor: ?kind= names the kind of the
+				// SUBJECT, and inventing one for the actor would assert
+				// something nobody asked for.
+				"",
 				orDefault(q.Get("act_clearance"), q.Get("clearance")),
 				orDefault(q.Get("act_compartments"), q.Get("compartments")),
 				orDefault(q.Get("act_verbs"), q.Get("verbs")),
@@ -239,7 +291,7 @@ func (s *server) serveTokenForPersona(w http.ResponseWriter, user, actor string,
 	// authority is intersected across the chain, but whose data is in scope
 	// is not a matter of intersection: an agent acting for jdoe is working on
 	// jdoe's tenant's data, and there is no second tenant to reconcile.
-	if tenant := s.tenantFor(u); tenant != "" {
+	if tenant := s.tenantFor(u.Tenant); tenant != "" {
 		body["tenant"] = tenant
 	}
 
@@ -274,12 +326,16 @@ func (s *server) serveTokenForPersona(w http.ResponseWriter, user, actor string,
 	_, _ = fmt.Fprintln(w, token)
 }
 
-// tenantFor resolves the tenant this identity's token carries: the persona's
-// own, then --tenant, then the personas file's. Most specific wins, which is
-// the order every other override in this package uses.
-func (s *server) tenantFor(p persona) string {
-	if p.Tenant != "" {
-		return p.Tenant
+// tenantFor resolves the tenant this identity's token carries: its own, then
+// --tenant, then the personas file's. Most specific wins, which is the order
+// every other override in this package uses.
+//
+// It takes the identity's own value rather than a persona so that a service —
+// which is not in the personas file — resolves a tenant the same way, instead
+// of a second rule nobody would think to keep in step.
+func (s *server) tenantFor(own string) string {
+	if own != "" {
+		return own
 	}
 	if s.tenant != "" {
 		return s.tenant
@@ -332,9 +388,15 @@ func (s *server) sign(body map[string]any) (string, error) {
 	return obj.CompactSerialize()
 }
 
-func garmClaim(clearance, compartments, verbs, sets string) map[string]any {
+func garmClaim(kind, clearance, compartments, verbs, sets string) map[string]any {
 	c := map[string]any{
 		"clearance": canonicalClearance(orDefault(clearance, "CLEARANCE_INTERNAL")),
+	}
+	// Only when asked for. The verifier reads an absent `kind` as a principal
+	// whose kind was never stated, which is exactly what these tokens have
+	// always been.
+	if kind != "" {
+		c["kind"] = kind
 	}
 	if v := splitList(compartments); len(v) > 0 {
 		c["compartments"] = v
